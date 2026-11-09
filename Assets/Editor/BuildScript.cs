@@ -48,10 +48,38 @@ public static class BuildScript
         }
     }
 
+    // Rigged character (Meshy auto-rig) + its animation FBX files: import as Legacy animation
+    // with looping clips so GameManager can cross-fade idle / run at runtime.
+    [MenuItem("StarCatcher/Prepare Rig")]
+    public static void PrepareRig()
+    {
+        var paths = new System.Collections.Generic.List<string> { "Assets/Resources/Models/player.fbx" };
+        if (System.IO.Directory.Exists("Assets/Resources/Models/Anim"))
+            foreach (var f in System.IO.Directory.GetFiles("Assets/Resources/Models/Anim", "*.fbx")) paths.Add(f.Replace('\\', '/'));
+        foreach (var p in paths)
+        {
+            var imp = AssetImporter.GetAtPath(p) as ModelImporter;
+            if (imp == null) continue;
+            bool changed = false;
+            if (imp.animationType != ModelImporterAnimationType.Legacy) { imp.animationType = ModelImporterAnimationType.Legacy; changed = true; }
+            if (!imp.importAnimation) { imp.importAnimation = true; changed = true; }
+            if (changed) imp.SaveAndReimport();
+            var clips = imp.defaultClipAnimations;
+            if (imp.clipAnimations.Length == 0 || imp.clipAnimations[0].wrapMode != WrapMode.Loop)
+            {
+                foreach (var c in clips) { c.wrapMode = WrapMode.Loop; c.loopTime = true; }
+                imp.clipAnimations = clips;
+                imp.SaveAndReimport();
+            }
+            Debug.Log($"RIG {p}: {imp.animationType}, clips: {string.Join(",", System.Array.ConvertAll(imp.clipAnimations, c => c.name))}");
+        }
+    }
+
     [MenuItem("StarCatcher/Build Windows")]
     public static void BuildWindows()
     {
         PrepareModels();
+        PrepareRig();
         CreateScene();
         PlayerSettings.productName = "Star Catcher";
         PlayerSettings.fullScreenMode = FullScreenMode.Windowed;

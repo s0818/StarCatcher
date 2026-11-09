@@ -12,7 +12,11 @@ Unity 6 (6000.6.5f1) で作った簡単な2Dデモゲームです。
 ## AIで作った素材とツール
 - 3Dモデル（星・爆弾・プレイヤー）：[Meshy](https://www.meshy.ai) で生成（無料プラン、CC BY 4.0）
 - 効果音・紹介動画のナレーション：[ElevenLabs](https://elevenlabs.io) で生成（無料プラン、非商用）
+- リギング：プレイヤーのロボットは [Meshy](https://www.meshy.ai) の自動リギング（24本の骨＋走りアニメーション）。星・爆弾は骨を使わず、コードで動かしています
+- メッシュ最適化：星・爆弾のポリゴン数を、テクスチャを保ったまま約80%削減（`Promo/tools/mesh_optimize.py`）
+- 手順の詳細：[Promo/ASSET_PIPELINE.md](Promo/ASSET_PIPELINE.md)
 - BGM：プログラムで自動作曲（`Promo/tools/make_bgm.py`）
+- 紹介動画：`Promo/StarCatcher_Promo_v3_OpenMontage.mp4`（OpenMontage・Remotionで制作）
 - 難易度：テスト用Botで1,000回の自動プレイを行い、その結果から調整（`Promo/data`）
 
 コマンドラインオプション：`-theme 0〜3`（SPACE / OCEAN / SAKURA / NEON）、`-simulate N`（自動テスト）、`-record <フォルダ>`（録画）

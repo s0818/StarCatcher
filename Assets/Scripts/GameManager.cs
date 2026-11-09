@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEngine;
@@ -51,6 +51,75 @@ public class GameManager : MonoBehaviour
         public bool isBomb;
         public float speed;
         public float spin;
+        public float phase;
+    }
+
+    // ---- Rigged player (Meshy auto-rig: 24-bone humanoid + walk/run clips) ----
+    Animation playerAnim;
+    string idleClip;
+    Transform hips;
+    Vector3 hipsRest;
+    float squashTimer;
+    const float SquashTime = 0.35f;
+
+    void SetupRig()
+    {
+        playerAnim = player.GetComponentInChildren<Animation>();
+        if (!playerAnim) return;
+        idleClip = playerAnim.clip ? playerAnim.clip.name : null;
+        foreach (var (res, key) in new[] { ("Models/Anim/player_run", "run"), ("Models/Anim/player_walk", "walk") })
+        {
+            foreach (var c in Resources.LoadAll<AnimationClip>(res))
+            {
+                if (c.name.StartsWith("__preview")) continue;
+                c.wrapMode = WrapMode.Loop;
+                playerAnim.AddClip(c, key);
+                break;
+            }
+        }
+        foreach (var t in player.GetComponentsInChildren<Transform>())
+            if (t.name == "Hips") { hips = t; hipsRest = t.localPosition; break; }
+        playerAnim.cullingType = AnimationCullingType.AlwaysAnimate;
+        if (idleClip != null) playerAnim.Play(idleClip);
+        var names = new List<string>();
+        foreach (AnimationState st in playerAnim) names.Add($"{st.name}({st.length:F2}s,legacy={st.clip.legacy})");
+        Debug.Log($"RIG anim on '{playerAnim.gameObject.name}', idle={idleClip}, hips={(hips ? hips.name : "none")}, states: {string.Join(", ", names)}");
+    }
+
+    void UpdatePlayerAnimation(float h)
+    {
+        bool moving = Mathf.Abs(h) > 0.1f;
+        // Face the run direction; turn back toward the camera when standing still.
+        float yaw = moving ? (h > 0 ? 90f : 270f) : 180f;
+        player.rotation = Quaternion.Slerp(player.rotation, Quaternion.Euler(0, yaw, 0), 1f - Mathf.Exp(-14f * Time.deltaTime));
+        if (!playerAnim) return;
+        if (moving && playerAnim["run"] != null)
+        {
+            playerAnim.CrossFade("run", 0.12f);
+            playerAnim["run"].speed = Mathf.Lerp(0.8f, 1.3f, Mathf.Abs(h));
+        }
+        else if (idleClip != null) playerAnim.CrossFade(idleClip, 0.2f);
+    }
+
+    void LateUpdate()
+    {
+        if (!playerModel || player == null) return;
+        // Clips carry root motion on the hips: pin them horizontally so the character runs in place.
+        if (hips) hips.localPosition = new Vector3(hipsRest.x, hips.localPosition.y, hipsRest.z);
+        // Squash-and-stretch hit reaction (procedural, no extra clip needed)
+        if (squashTimer > 0)
+        {
+            squashTimer -= Time.deltaTime;
+            float a = squashTimer / SquashTime;
+            float s = Mathf.Sin(a * Mathf.PI) * 0.35f;
+            player.localScale = new Vector3(1f + s * 0.6f, 1f - s, 1f + s * 0.6f);
+        }
+        else
+        {
+            // Subtle idle "breathing" so the rest pose never looks frozen
+            float b = Mathf.Sin(Time.time * 3f) * 0.015f;
+            player.localScale = new Vector3(1f - b * 0.5f, 1f + b, 1f - b * 0.5f);
+        }
     }
 
     void Start()
@@ -112,6 +181,7 @@ public class GameManager : MonoBehaviour
         {
             player = Instantiate3D(playerModel, 1.7f).transform;
             playerRenderer = player.GetComponentInChildren<Renderer>();
+            SetupRig();
         }
         else
         {
@@ -172,7 +242,7 @@ public class GameManager : MonoBehaviour
         }
         p.x = Mathf.Clamp(p.x, -HalfWidth, HalfWidth);
         player.position = p;
-        if (playerModel) player.rotation = Quaternion.Euler(0, 180 + h * 25f, 0);
+        if (playerModel) UpdatePlayerAnimation(h);
 
         // Spawning gets faster over time
         float difficulty = 1f + elapsed / Settings.Ramp;
@@ -188,7 +258,24 @@ public class GameManager : MonoBehaviour
             var f = fallers[i];
             f.t.position += Vector3.down * f.speed * Time.deltaTime;
             if (f.t.GetComponent<SpriteRenderer>()) f.t.Rotate(0, 0, f.spin * Time.deltaTime);
-            else f.t.Rotate(0, f.spin * Time.deltaTime, 0, Space.World);
+            else
+            {
+                // Bone-less procedural animation for non-humanoid props
+                f.t.Rotate(0, f.spin * Time.deltaTime, 0, Space.World);
+                float k = Mathf.InverseLerp(5.8f, PlayerY, f.t.position.y); // 0 at top -> 1 near the ground
+                if (f.isBomb)
+                {
+                    // the bomb wobbles faster and swells as it gets closer ("about to blow")
+                    float w = Mathf.Sin((elapsed + f.phase) * Mathf.Lerp(6f, 22f, k));
+                    f.t.localScale = Vector3.one * (1f + 0.08f * k * Mathf.Abs(w));
+                    f.t.rotation = Quaternion.Euler(15, f.t.eulerAngles.y, w * 10f);
+                }
+                else
+                {
+                    // the star pulses like a twinkle
+                    f.t.localScale = Vector3.one * (1f + 0.07f * Mathf.Sin((elapsed + f.phase) * 9f));
+                }
+            }
 
             if (Vector2.Distance(f.t.position, player.position) < CatchRadius)
             {
@@ -196,6 +283,7 @@ public class GameManager : MonoBehaviour
                 {
                     lives--; hits++;
                     flashTimer = 0.4f;
+                    squashTimer = SquashTime;
                     Play(hitClip);
                     if (lives <= 0) GameOver();
                 }
@@ -307,7 +395,8 @@ public class GameManager : MonoBehaviour
             t = t,
             isBomb = bomb,
             speed = Random.Range(2.5f, 4f) * difficulty,
-            spin = model ? Random.Range(60f, 140f) : (bomb ? 0 : Random.Range(-180f, 180f))
+            spin = model ? Random.Range(60f, 140f) : (bomb ? 0 : Random.Range(-180f, 180f)),
+            phase = Random.Range(0f, 10f)
         });
     }
 
@@ -405,7 +494,7 @@ public class GameManager : MonoBehaviour
             string title = state == State.Title ? "STAR CATCHER" : "GAME OVER";
             GUI.Label(new Rect(0, hgt * 0.25f, w, hgt * 0.15f), title, bigStyle);
             string info = state == State.Title
-                ? $"- {theme.Name} -\nCatch the stars, dodge the bombs!\n竊・竊・/ A D / mouse to move"
+                ? $"- {theme.Name} -\nCatch the stars, dodge the bombs!\n<- -> / A D / mouse to move"
                 : $"Score {score}    Best {best}";
             GUI.Label(new Rect(0, hgt * 0.42f, w, hgt * 0.2f), info, smallStyle);
             GUI.Label(new Rect(0, hgt * 0.65f, w, hgt * 0.1f), "Press SPACE or click to start", smallStyle);
