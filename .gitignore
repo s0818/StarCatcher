@@ -10,4 +10,5 @@
 *.sln
 *.slnx
 *.log
+*.zip
 .vs/
