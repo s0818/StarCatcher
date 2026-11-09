@@ -1,8 +1,11 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using UnityEngine;
 
 // Star Catcher: catch falling stars, dodge bombs.
-// Everything (sprites, objects, UI) is generated from code so the scene stays minimal.
+// Visuals are generated from code; optional AI-generated 3D models and sounds are
+// picked up automatically from Resources/Models and Resources/Audio when present.
 public class GameManager : MonoBehaviour
 {
     enum State { Title, Playing, GameOver }
@@ -11,18 +14,36 @@ public class GameManager : MonoBehaviour
     const float PlayerY = -4f;
     const float PlayerSpeed = 9f;
     const float CatchRadius = 0.75f;
+    const float SimTimeLimit = 300f;
 
     State state = State.Title;
     Transform player;
     readonly List<Faller> fallers = new List<Faller>();
-    Sprite circleSprite, starSprite, squareSprite;
+    Sprite circleSprite, goodSprite, squareSprite;
+    Theme theme;
 
     int score, lives, best;
     float elapsed, spawnTimer;
     float flashTimer;
     float stateTimer;
-    SpriteRenderer playerRenderer;
+    Renderer playerRenderer;
+    Color playerBaseColor;
     GUIStyle bigStyle, smallStyle;
+
+    // Optional AI-generated assets
+    GameObject goodModel, badModel, playerModel;
+    readonly Dictionary<string, Material> texMats = new Dictionary<string, Material>();
+    AudioSource sfx, music;
+    AudioClip catchClip, hitClip, overClip, bgmClip;
+
+    // Bot state
+    bool BotActive => DemoRecorder.Active || Settings.Simulate > 0;
+    float botTimer, botH;
+
+    // Simulation results
+    int simGame;
+    readonly StringBuilder simCsv = new StringBuilder("game,ramp,bomb,score,survival_s,stars,hits\n");
+    int stars, hits;
 
     class Faller
     {
@@ -34,47 +55,86 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
+        theme = Themes.All[Settings.Theme];
         best = PlayerPrefs.GetInt("best", 0);
-        if (DemoRecorder.Active) { Random.InitState(7); best = 0; }
+        if (BotActive) { Random.InitState(Settings.Seed); best = 0; }
 
         var cam = Camera.main;
         cam.orthographic = true;
         cam.orthographicSize = 5f;
-        cam.backgroundColor = new Color(0.05f, 0.06f, 0.15f);
+        cam.backgroundColor = theme.Bg;
         cam.clearFlags = CameraClearFlags.SolidColor;
 
         circleSprite = MakeSprite(64, (x, y) => x * x + y * y <= 1f);
         squareSprite = MakeSprite(8, (x, y) => true);
-        starSprite = MakeSprite(64, IsInStar);
+        goodSprite = MakeSprite(64, theme.Shape == 1 ? IsInFlower : theme.Shape == 2 ? (System.Func<float, float, bool>)IsInGem : IsInStar);
 
-        // Background stars
+        goodModel = Resources.Load<GameObject>("Models/good");
+        badModel = Resources.Load<GameObject>("Models/bad");
+        playerModel = Resources.Load<GameObject>("Models/player");
+        if (goodModel || badModel || playerModel)
+        {
+            var light = new GameObject("Light").AddComponent<Light>();
+            light.type = LightType.Directional;
+            light.intensity = 1.4f;
+            light.transform.rotation = Quaternion.Euler(35, -30, 0);
+            RenderSettings.ambientLight = new Color(0.75f, 0.75f, 0.8f);
+        }
+
+        if (Settings.Simulate == 0)
+        {
+            sfx = gameObject.AddComponent<AudioSource>();
+            music = gameObject.AddComponent<AudioSource>();
+            music.loop = true; music.volume = 0.45f;
+            catchClip = Resources.Load<AudioClip>("Audio/catch");
+            hitClip = Resources.Load<AudioClip>("Audio/hit");
+            overClip = Resources.Load<AudioClip>("Audio/gameover");
+            bgmClip = Resources.Load<AudioClip>("Audio/bgm");
+            if (bgmClip) { music.clip = bgmClip; music.Play(); }
+        }
+
+        // Background dots
         for (int i = 0; i < 60; i++)
         {
-            var s = CreateSprite("BgStar", circleSprite, new Color(1, 1, 1, Random.Range(0.15f, 0.5f)), -10);
+            var c = theme.BgDot; c.a = Random.Range(0.15f, 0.5f);
+            var s = CreateSprite("BgDot", circleSprite, c, -10);
             s.transform.position = new Vector3(Random.Range(-9f, 9f), Random.Range(-5f, 5f), 0);
             s.transform.localScale = Vector3.one * Random.Range(0.03f, 0.08f);
         }
 
         // Ground
-        var ground = CreateSprite("Ground", squareSprite, new Color(0.2f, 0.25f, 0.4f), -5);
+        var ground = CreateSprite("Ground", squareSprite, theme.Ground, -5);
         ground.transform.position = new Vector3(0, PlayerY - 0.55f, 0);
         ground.transform.localScale = new Vector3(HalfWidth * 2 + 1f, 0.15f, 1);
 
-        // Player (a little round catcher)
-        playerRenderer = CreateSprite("Player", circleSprite, new Color(0.35f, 0.85f, 1f), 0);
-        player = playerRenderer.transform;
+        // Player
+        if (playerModel)
+        {
+            player = Instantiate3D(playerModel, 1.7f).transform;
+            playerRenderer = player.GetComponentInChildren<Renderer>();
+        }
+        else
+        {
+            var sr = CreateSprite("Player", circleSprite, theme.Player, 0);
+            player = sr.transform;
+            player.localScale = new Vector3(1.1f, 0.8f, 1);
+            playerRenderer = sr;
+        }
+        playerBaseColor = playerRenderer.material.HasProperty("_Color") ? playerRenderer.material.color : Color.white;
         player.position = new Vector3(0, PlayerY, 0);
-        player.localScale = new Vector3(1.1f, 0.8f, 1);
+
+        if (Settings.Simulate > 0) StartGame();
     }
 
     void StartGame()
     {
         foreach (var f in fallers) Destroy(f.t.gameObject);
         fallers.Clear();
-        score = 0;
+        score = 0; stars = 0; hits = 0;
         lives = 3;
         elapsed = 0;
         spawnTimer = 0.5f;
+        botTimer = 0; botH = 0;
         player.position = new Vector3(0, PlayerY, 0);
         state = State.Playing;
     }
@@ -99,10 +159,9 @@ public class GameManager : MonoBehaviour
 
         elapsed += Time.deltaTime;
 
-        // Movement: keyboard, or follow the mouse while button held
-        float h = DemoRecorder.Active ? AutoPilot() : Input.GetAxisRaw("Horizontal");
+        float h = BotActive ? BotInput() : Input.GetAxisRaw("Horizontal");
         var p = player.position;
-        if (!DemoRecorder.Active && Input.GetMouseButton(0))
+        if (!BotActive && Input.GetMouseButton(0))
         {
             float mx = Camera.main.ScreenToWorldPoint(Input.mousePosition).x;
             p.x = Mathf.MoveTowards(p.x, mx, PlayerSpeed * Time.deltaTime);
@@ -113,9 +172,10 @@ public class GameManager : MonoBehaviour
         }
         p.x = Mathf.Clamp(p.x, -HalfWidth, HalfWidth);
         player.position = p;
+        if (playerModel) player.rotation = Quaternion.Euler(0, 180 + h * 25f, 0);
 
         // Spawning gets faster over time
-        float difficulty = 1f + elapsed / 20f;
+        float difficulty = 1f + elapsed / Settings.Ramp;
         spawnTimer -= Time.deltaTime;
         if (spawnTimer <= 0)
         {
@@ -123,24 +183,26 @@ public class GameManager : MonoBehaviour
             spawnTimer = Mathf.Max(0.25f, 0.9f / difficulty);
         }
 
-        // Fallers
         for (int i = fallers.Count - 1; i >= 0; i--)
         {
             var f = fallers[i];
             f.t.position += Vector3.down * f.speed * Time.deltaTime;
-            f.t.Rotate(0, 0, f.spin * Time.deltaTime);
+            if (f.t.GetComponent<SpriteRenderer>()) f.t.Rotate(0, 0, f.spin * Time.deltaTime);
+            else f.t.Rotate(0, f.spin * Time.deltaTime, 0, Space.World);
 
             if (Vector2.Distance(f.t.position, player.position) < CatchRadius)
             {
                 if (f.isBomb)
                 {
-                    lives--;
+                    lives--; hits++;
                     flashTimer = 0.4f;
+                    Play(hitClip);
                     if (lives <= 0) GameOver();
                 }
                 else
                 {
-                    score += 10;
+                    score += 10; stars++;
+                    Play(catchClip, 0.6f);
                 }
                 Remove(i);
                 if (state != State.Playing) return;
@@ -151,22 +213,36 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        // Hit flash
+        if (Settings.Simulate > 0 && elapsed > SimTimeLimit) { GameOver(); return; }
+
         if (flashTimer > 0)
         {
             flashTimer -= Time.deltaTime;
-            playerRenderer.color = Color.Lerp(new Color(0.35f, 0.85f, 1f), Color.red, flashTimer / 0.4f);
+            playerRenderer.material.color = Color.Lerp(playerBaseColor, Color.red, flashTimer / 0.4f);
         }
     }
 
-    // Simple AI used in demo/recording mode: chase reachable stars, dodge incoming bombs.
-    // After ~40 seconds it stops dodging so the recording also shows the game-over screen.
-    float AutoPilot()
+    void Play(AudioClip c, float vol = 1f) { if (sfx && c) sfx.PlayOneShot(c, vol); }
+
+    // Bot input. In recording mode it plays sharply (and gets careless after 40s so the
+    // video shows a game over). In simulation mode it behaves like a human player:
+    // it re-decides only every ~0.2s and misjudges positions slightly.
+    float BotInput()
+    {
+        if (DemoRecorder.Active) return AutoPilot(elapsed > 40f, 0f);
+        botTimer -= Time.deltaTime;
+        if (botTimer <= 0)
+        {
+            botTimer = Random.Range(0.15f, 0.28f);
+            botH = AutoPilot(false, 0.45f);
+        }
+        return botH;
+    }
+
+    float AutoPilot(bool careless, float error)
     {
         float px = player.position.x;
-        bool careless = elapsed > 40f;
 
-        // Target: the reachable star that arrives soonest
         float targetX = 0f;
         float bestT = float.MaxValue;
         foreach (var f in fallers)
@@ -179,7 +255,6 @@ public class GameManager : MonoBehaviour
             if (t < bestT) { bestT = t; targetX = f.t.position.x; }
         }
 
-        // Score candidate positions near the player
         float bestX = px, bestCost = float.MaxValue;
         for (float x = -HalfWidth; x <= HalfWidth + 0.01f; x += 0.25f)
         {
@@ -193,9 +268,8 @@ public class GameManager : MonoBehaviour
                     if (dy < -0.5f) continue;
                     float t = dy / f.speed;
                     if (t > 1.2f) continue;
-                    // Would we be under this bomb when it lands, given travel along the way?
                     float lo = Mathf.Min(px, x), hi = Mathf.Max(px, x);
-                    float bx = f.t.position.x;
+                    float bx = f.t.position.x + (error > 0 ? Random.Range(-error, error) : 0f);
                     float pathDist = bx < lo ? lo - bx : bx > hi ? bx - hi : 0f;
                     if (Mathf.Abs(bx - x) < 1.1f) cost += 100f;
                     else if (pathDist < 1.0f && t < 0.5f) cost += 30f;
@@ -211,19 +285,61 @@ public class GameManager : MonoBehaviour
 
     void Spawn(float difficulty)
     {
-        bool bomb = Random.value < Mathf.Min(0.5f, 0.25f + elapsed / 120f);
-        var sr = bomb
-            ? CreateSprite("Bomb", circleSprite, new Color(1f, 0.3f, 0.35f), 1)
-            : CreateSprite("Star", starSprite, new Color(1f, 0.9f, 0.3f), 1);
-        sr.transform.position = new Vector3(Random.Range(-HalfWidth, HalfWidth), 5.8f, 0);
-        sr.transform.localScale = Vector3.one * (bomb ? 0.7f : 0.8f);
+        bool bomb = Random.value < Mathf.Min(0.5f, Settings.BombRate + elapsed / 120f);
+        Transform t;
+        var model = bomb ? badModel : goodModel;
+        if (model)
+        {
+            t = Instantiate3D(model, bomb ? 1.0f : 1.15f).transform;
+            t.rotation = Quaternion.Euler(15, Random.Range(0, 360f), 0);
+        }
+        else
+        {
+            var sr = bomb
+                ? CreateSprite("Bomb", circleSprite, theme.Bad, 1)
+                : CreateSprite("Good", goodSprite, theme.Good, 1);
+            sr.transform.localScale = Vector3.one * (bomb ? 0.7f : 0.8f);
+            t = sr.transform;
+        }
+        t.position = new Vector3(Random.Range(-HalfWidth, HalfWidth), 5.8f, 0);
         fallers.Add(new Faller
         {
-            t = sr.transform,
+            t = t,
             isBomb = bomb,
             speed = Random.Range(2.5f, 4f) * difficulty,
-            spin = bomb ? 0 : Random.Range(-180f, 180f)
+            spin = model ? Random.Range(60f, 140f) : (bomb ? 0 : Random.Range(-180f, 180f))
         });
+    }
+
+    // Instantiates a model and scales it so its largest dimension equals `size` world units.
+    GameObject Instantiate3D(GameObject prefab, float size)
+    {
+        var root = new GameObject(prefab.name);
+        var go = Instantiate(prefab, root.transform);
+        var rs = go.GetComponentsInChildren<Renderer>();
+        // Apply the AI-generated texture (extracted from the FBX into Resources/Models/Textures/<name>)
+        var tex = Resources.Load<Texture2D>($"Models/Textures/{prefab.name}/Image_0");
+        if (tex)
+        {
+            if (!texMats.TryGetValue(prefab.name, out var mat))
+            {
+                mat = new Material(Shader.Find("Standard")) { mainTexture = tex };
+                mat.SetFloat("_Glossiness", 0.35f);
+                texMats[prefab.name] = mat;
+            }
+            foreach (var r in rs) r.sharedMaterial = mat;
+        }
+        if (rs.Length > 0)
+        {
+            var b = rs[0].bounds;
+            foreach (var r in rs) b.Encapsulate(r.bounds);
+            float m = Mathf.Max(b.size.x, b.size.y, b.size.z);
+            if (m > 0) go.transform.localScale *= size / m;
+            b = rs[0].bounds;
+            foreach (var r in rs) b.Encapsulate(r.bounds);
+            go.transform.position -= b.center - root.transform.position;
+        }
+        return root;
     }
 
     void Remove(int i)
@@ -236,7 +352,24 @@ public class GameManager : MonoBehaviour
     {
         state = State.GameOver;
         stateTimer = 0;
-        playerRenderer.color = new Color(0.35f, 0.85f, 1f);
+        playerRenderer.material.color = playerBaseColor;
+        Play(overClip);
+        if (music) music.Stop();
+
+        if (Settings.Simulate > 0)
+        {
+            simGame++;
+            simCsv.AppendLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "{0},{1},{2},{3},{4:F2},{5},{6}", simGame, Settings.Ramp, Settings.BombRate, score, elapsed, stars, hits));
+            if (simGame >= Settings.Simulate)
+            {
+                File.WriteAllText(Settings.Out, simCsv.ToString());
+                Application.Quit();
+            }
+            else StartGame();
+            return;
+        }
+
         if (score > best && DemoRecorder.Active) best = score;
         else if (score > best)
         {
@@ -248,10 +381,13 @@ public class GameManager : MonoBehaviour
 
     void OnGUI()
     {
+        if (Settings.Simulate > 0) return;
         if (bigStyle == null)
         {
             bigStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold };
             smallStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
+            var txt = theme.Bg.grayscale > 0.5f ? new Color(0.2f, 0.15f, 0.2f) : new Color(0.95f, 0.95f, 1f);
+            bigStyle.normal.textColor = txt; smallStyle.normal.textColor = txt;
         }
         bigStyle.fontSize = Screen.height / 10;
         smallStyle.fontSize = Screen.height / 28;
@@ -269,9 +405,9 @@ public class GameManager : MonoBehaviour
             string title = state == State.Title ? "STAR CATCHER" : "GAME OVER";
             GUI.Label(new Rect(0, hgt * 0.25f, w, hgt * 0.15f), title, bigStyle);
             string info = state == State.Title
-                ? "Catch the stars, dodge the bombs!\n← → / A D / mouse to move"
+                ? $"- {theme.Name} -\nCatch the stars, dodge the bombs!\n竊・竊・/ A D / mouse to move"
                 : $"Score {score}    Best {best}";
-            GUI.Label(new Rect(0, hgt * 0.45f, w, hgt * 0.15f), info, smallStyle);
+            GUI.Label(new Rect(0, hgt * 0.42f, w, hgt * 0.2f), info, smallStyle);
             GUI.Label(new Rect(0, hgt * 0.65f, w, hgt * 0.1f), "Press SPACE or click to start", smallStyle);
         }
     }
@@ -288,7 +424,6 @@ public class GameManager : MonoBehaviour
         return sr;
     }
 
-    // Builds a white sprite of size 1 world unit; shape test takes coords in [-1,1].
     static Sprite MakeSprite(int size, System.Func<float, float, bool> inside)
     {
         var tex = new Texture2D(size, size, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
@@ -308,9 +443,16 @@ public class GameManager : MonoBehaviour
     {
         float r = Mathf.Sqrt(x * x + y * y);
         float a = Mathf.Atan2(y, x) + Mathf.PI / 2;
-        // 5-point star: radius oscillates between outer and inner
-        float k = Mathf.Abs(Mathf.Repeat(a * 5 / (2 * Mathf.PI), 1f) - 0.5f) * 2; // 1 at tips, 0 between
-        float edge = Mathf.Lerp(0.45f, 1f, k);
-        return r <= edge;
+        float k = Mathf.Abs(Mathf.Repeat(a * 5 / (2 * Mathf.PI), 1f) - 0.5f) * 2;
+        return r <= Mathf.Lerp(0.45f, 1f, k);
     }
+
+    static bool IsInFlower(float x, float y)
+    {
+        float r = Mathf.Sqrt(x * x + y * y);
+        float a = Mathf.Atan2(y, x) + Mathf.PI / 2;
+        return r <= 0.55f + 0.45f * Mathf.Abs(Mathf.Cos(a * 2.5f));
+    }
+
+    static bool IsInGem(float x, float y) => Mathf.Abs(x) * 1.3f + Mathf.Abs(y) <= 1f;
 }

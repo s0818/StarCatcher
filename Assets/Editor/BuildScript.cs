@@ -25,12 +25,37 @@ public static class BuildScript
         AssetDatabase.SaveAssets();
     }
 
+    // Extracts textures embedded in the AI-generated FBX models so their materials show color.
+    [MenuItem("StarCatcher/Prepare AI Models")]
+    public static void PrepareModels()
+    {
+        const string dir = "Assets/Resources/Models";
+        if (!System.IO.Directory.Exists(dir)) return;
+        foreach (var path in System.IO.Directory.GetFiles(dir, "*.fbx"))
+        {
+            var p = path.Replace('\\', '/');
+            var name = System.IO.Path.GetFileNameWithoutExtension(p);
+            var texDir = $"{dir}/Textures/{name}";
+            if (System.IO.Directory.Exists(texDir)) continue;
+            System.IO.Directory.CreateDirectory(texDir);
+            var imp = (ModelImporter)AssetImporter.GetAtPath(p);
+            imp.ExtractTextures(texDir);
+            AssetDatabase.Refresh();
+            imp.materialImportMode = ModelImporterMaterialImportMode.ImportStandard;
+            imp.materialLocation = ModelImporterMaterialLocation.InPrefab;
+            imp.materialSearch = ModelImporterMaterialSearch.Everywhere;
+            imp.SaveAndReimport();
+        }
+    }
+
     [MenuItem("StarCatcher/Build Windows")]
     public static void BuildWindows()
     {
+        PrepareModels();
         CreateScene();
         PlayerSettings.productName = "Star Catcher";
         PlayerSettings.fullScreenMode = FullScreenMode.Windowed;
+        PlayerSettings.runInBackground = true;
         PlayerSettings.defaultScreenWidth = 1280;
         PlayerSettings.defaultScreenHeight = 720;
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions

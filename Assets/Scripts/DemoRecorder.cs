@@ -31,8 +31,18 @@ public class DemoRecorder : MonoBehaviour
         }
     }
 
+    static int maxFrames = int.MaxValue;
+
+    void Start()
+    {
+        var args = System.Environment.GetCommandLineArgs();
+        for (int i = 0; i < args.Length - 1; i++)
+            if (args[i] == "-frames") int.TryParse(args[i + 1], out maxFrames);
+    }
+
     void LateUpdate()
     {
+        if (frame >= maxFrames) { Application.Quit(); return; }
         ScreenCapture.CaptureScreenshot(Path.Combine(OutputDir, $"f{frame:D5}.png"));
         frame++;
     }

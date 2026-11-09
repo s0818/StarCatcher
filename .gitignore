@@ -12,3 +12,5 @@
 *.log
 *.zip
 .vs/
+
+.env
