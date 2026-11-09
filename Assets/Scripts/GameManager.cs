@@ -20,6 +20,7 @@ public class GameManager : MonoBehaviour
     int score, lives, best;
     float elapsed, spawnTimer;
     float flashTimer;
+    float stateTimer;
     SpriteRenderer playerRenderer;
     GUIStyle bigStyle, smallStyle;
 
@@ -34,6 +35,7 @@ public class GameManager : MonoBehaviour
     void Start()
     {
         best = PlayerPrefs.GetInt("best", 0);
+        if (DemoRecorder.Active) { Random.InitState(7); best = 0; }
 
         var cam = Camera.main;
         cam.orthographic = true;
@@ -84,16 +86,23 @@ public class GameManager : MonoBehaviour
 
         if (state != State.Playing)
         {
-            if (action) StartGame();
+            if (DemoRecorder.Active)
+            {
+                stateTimer += Time.deltaTime;
+                if (state == State.Title && stateTimer > 3f) action = true;
+                if (state == State.GameOver && stateTimer > 4f) { Application.Quit(); return; }
+            }
+            if (action && state == State.Title) StartGame();
+            else if (action && !DemoRecorder.Active) StartGame();
             return;
         }
 
         elapsed += Time.deltaTime;
 
         // Movement: keyboard, or follow the mouse while button held
-        float h = Input.GetAxisRaw("Horizontal");
+        float h = DemoRecorder.Active ? AutoPilot() : Input.GetAxisRaw("Horizontal");
         var p = player.position;
-        if (Input.GetMouseButton(0))
+        if (!DemoRecorder.Active && Input.GetMouseButton(0))
         {
             float mx = Camera.main.ScreenToWorldPoint(Input.mousePosition).x;
             p.x = Mathf.MoveTowards(p.x, mx, PlayerSpeed * Time.deltaTime);
@@ -150,6 +159,56 @@ public class GameManager : MonoBehaviour
         }
     }
 
+    // Simple AI used in demo/recording mode: chase reachable stars, dodge incoming bombs.
+    // After ~40 seconds it stops dodging so the recording also shows the game-over screen.
+    float AutoPilot()
+    {
+        float px = player.position.x;
+        bool careless = elapsed > 40f;
+
+        // Target: the reachable star that arrives soonest
+        float targetX = 0f;
+        float bestT = float.MaxValue;
+        foreach (var f in fallers)
+        {
+            if (f.isBomb) continue;
+            float dy = f.t.position.y - PlayerY;
+            if (dy < -0.3f) continue;
+            float t = dy / f.speed;
+            if (Mathf.Abs(f.t.position.x - px) > PlayerSpeed * t + CatchRadius) continue;
+            if (t < bestT) { bestT = t; targetX = f.t.position.x; }
+        }
+
+        // Score candidate positions near the player
+        float bestX = px, bestCost = float.MaxValue;
+        for (float x = -HalfWidth; x <= HalfWidth + 0.01f; x += 0.25f)
+        {
+            float cost = Mathf.Abs(x - targetX) * 0.3f + Mathf.Abs(x - px) * 0.05f;
+            if (!careless)
+            {
+                foreach (var f in fallers)
+                {
+                    if (!f.isBomb) continue;
+                    float dy = f.t.position.y - PlayerY;
+                    if (dy < -0.5f) continue;
+                    float t = dy / f.speed;
+                    if (t > 1.2f) continue;
+                    // Would we be under this bomb when it lands, given travel along the way?
+                    float lo = Mathf.Min(px, x), hi = Mathf.Max(px, x);
+                    float bx = f.t.position.x;
+                    float pathDist = bx < lo ? lo - bx : bx > hi ? bx - hi : 0f;
+                    if (Mathf.Abs(bx - x) < 1.1f) cost += 100f;
+                    else if (pathDist < 1.0f && t < 0.5f) cost += 30f;
+                }
+            }
+            if (cost < bestCost) { bestCost = cost; bestX = x; }
+        }
+
+        float diff = bestX - px;
+        if (Mathf.Abs(diff) < 0.1f) return 0f;
+        return Mathf.Clamp(diff * 3f, -1f, 1f);
+    }
+
     void Spawn(float difficulty)
     {
         bool bomb = Random.value < Mathf.Min(0.5f, 0.25f + elapsed / 120f);
@@ -176,8 +235,10 @@ public class GameManager : MonoBehaviour
     void GameOver()
     {
         state = State.GameOver;
+        stateTimer = 0;
         playerRenderer.color = new Color(0.35f, 0.85f, 1f);
-        if (score > best)
+        if (score > best && DemoRecorder.Active) best = score;
+        else if (score > best)
         {
             best = score;
             PlayerPrefs.SetInt("best", best);
